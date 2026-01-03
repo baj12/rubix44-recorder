@@ -158,3 +158,6 @@ temp_file.py
 
 # Large playback files
 playback_files/*.wav
+
+# BFG Repo-Cleaner
+bfg-*.jar
