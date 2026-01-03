@@ -152,3 +152,6 @@ recordings/
 
 # Local configuration files
 *.local
+
+# Temporary files
+temp_file.py
