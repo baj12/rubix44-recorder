@@ -1,0 +1,15 @@
+name: rubix-recorder-api
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - pip
+  - pip:
+    - flask==2.3.3
+    - flask-cors==4.0.0
+    - sounddevice>=0.4.6
+    - soundfile>=0.12.1
+    - python-dateutil>=2.8.2
