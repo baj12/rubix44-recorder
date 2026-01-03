@@ -155,3 +155,6 @@ recordings/
 
 # Temporary files
 temp_file.py
+
+# Large playback files
+playback_files/*.wav
