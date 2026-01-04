@@ -9,7 +9,7 @@ The Rubix Recorder API provides a RESTful interface for controlling audio record
 All endpoints are prefixed with `/api/v1`:
 
 ```
-http://localhost:5000/api/v1
+http://10.0.0.58:5000/api/v1
 ```
 
 ## Authentication
