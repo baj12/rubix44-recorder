@@ -42,6 +42,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Enable debug logging for remote debugging
+if config.get("debug", False):
+    logging.getLogger().setLevel(logging.DEBUG)
+
 # Create logs directory if it doesn't exist
 os.makedirs('logs', exist_ok=True)
 
@@ -145,13 +149,16 @@ def start_recording_in_thread(session):
     """Start recording in a separate thread"""
     global current_recording_session
     
+    logger.debug(f"Starting recording thread for session {session.id}")
     with recording_lock:
         current_recording_session = session
         session.status = "recording"
         session.start_time = datetime.now()
+        logger.debug(f"Session {session.id} status set to recording at {session.start_time}")
         
     try:
         # Create recorder instance
+        logger.debug(f"Creating AudioRecorder with duration={session.duration}, sample_rate={session.sample_rate}")
         recorder = AudioRecorder(
             duration=session.duration,
             sample_rate=session.sample_rate
@@ -159,28 +166,34 @@ def start_recording_in_thread(session):
         
         # Store recorder reference in session
         session.recorder = recorder
+        logger.debug(f"Stored recorder reference for session {session.id}")
         
         # Start recording with playback
+        logger.debug(f"Calling record_with_playback with playback_file={session.playback_file_path}, output_prefix={session.output_prefix}")
         success = recorder.record_with_playback(
             session.playback_file_path,  # Use the full path
             session.output_prefix
         )
+        logger.debug(f"record_with_playback returned success={success}")
         
         with recording_lock:
             if success or session.status == "stopped":  # Accept both completed and stopped
                 if session.status != "stopped":
                     session.status = "completed"
                 session.end_time = datetime.now()
+                logger.debug(f"Session {session.id} completed at {session.end_time} with status {session.status}")
                 
                 # Calculate actual duration
                 if session.start_time and session.end_time:
                     actual_duration = (session.end_time - session.start_time).total_seconds()
                 else:
                     actual_duration = session.duration
+                logger.debug(f"Actual recording duration: {actual_duration} seconds")
                 
                 # Collect generated files
                 timestamp = session.start_time.strftime("%Y-%m-%d_%H-%M-%S")
                 base_path = f"{config['recordings_directory']}/{session.output_prefix}_{timestamp}"
+                logger.debug(f"Base path for recording files: {base_path}")
                 
                 session.files = [
                     f"{base_path}_stereo.wav",
@@ -191,6 +204,7 @@ def start_recording_in_thread(session):
                 # Verify files exist and add metadata
                 verified_files = []
                 for file_path in session.files:
+                    logger.debug(f"Checking if file exists: {file_path}")
                     if os.path.exists(file_path):
                         stat = os.stat(file_path)
                         verified_files.append({
@@ -199,16 +213,21 @@ def start_recording_in_thread(session):
                             "size": stat.st_size,
                             "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
                         })
+                        logger.debug(f"File exists and added to session: {file_path}")
+                    else:
+                        logger.warning(f"File does not exist: {file_path}")
                 session.files = verified_files
                 
                 # Add duration to session for history
                 session.actual_duration = actual_duration
+                logger.debug(f"Session {session.id} files verified: {len(session.files)} files found")
             else:
                 session.status = "error"
                 session.error = "Recording failed"
+                logger.error(f"Session {session.id} recording failed")
                 
     except Exception as e:
-        logger.error(f"Error during recording: {e}")
+        logger.error(f"Error during recording: {e}", exc_info=True)
         with recording_lock:
             session.status = "error"
             session.error = str(e)
@@ -216,6 +235,7 @@ def start_recording_in_thread(session):
     finally:
         with recording_lock:
             current_recording_session = None
+            logger.debug(f"Recording thread for session {session.id} completed")
 
 @app.route('/api/v1/health', methods=['GET'])
 def health_check():
@@ -361,38 +381,53 @@ def start_recording():
     """Start a new recording session"""
     global recording_thread
     
+    logger.debug("Starting recording request processing")
+    
     # Check if already recording
     with recording_lock:
         if current_recording_session and current_recording_session.status == "recording":
+            logger.warning("Recording already in progress")
             return jsonify({"error": "Recording already in progress"}), 400
     
     # Get parameters from request
     data = request.get_json()
+    logger.debug(f"Received data: {data}")
+    
     if not data:
+        logger.error("No data provided in request")
         return jsonify({"error": "No data provided"}), 400
     
     playback_file = data.get('playback_file')
+    logger.debug(f"Requested playback file: {playback_file}")
+    
     if not playback_file:
+        logger.error("Playback file not provided")
         return jsonify({"error": "playback_file is required"}), 400
     
     # Verify playback file exists
     if not os.path.exists(playback_file):
+        logger.debug(f"Playback file not found at {playback_file}, checking in playback directory")
         # Check in playback directory
         playback_path = os.path.join(config["playback_directory"], playback_file)
         if os.path.exists(playback_path):
             playback_file = playback_path
+            logger.debug(f"Found playback file at {playback_file}")
         else:
+            logger.error(f"Playback file not found: {playback_file}")
             return jsonify({"error": f"Playback file not found: {playback_file}"}), 404
     
     # Create recording session
+    logger.debug(f"Creating recording session with playback file: {playback_file}")
     session = RecordingSession(
         playback_file=playback_file,  # Store the full path
         duration=data.get('duration'),
         sample_rate=data.get('sample_rate'),
         output_prefix=data.get('output_prefix')
     )
+    logger.debug(f"Created session with ID: {session.id}")
     
     # Start recording in background thread
+    logger.debug("Starting recording thread")
     recording_thread = threading.Thread(
         target=start_recording_in_thread,
         args=(session,),
@@ -401,6 +436,7 @@ def start_recording():
     recording_thread.start()
     
     logger.info(f"Started recording session {session.id}")
+    logger.debug(f"Session details: {session.to_dict()}")
     return jsonify({
         "message": "Recording started",
         "session": session.to_dict()
@@ -517,14 +553,14 @@ def get_recording_history():
                             "start_time": start_time_str,
                             "end_time": end_time_str,
                             "duration_seconds": duration_seconds,
-                            "playback_file": "unknown",
+                            "playback_file": prefix,  # Use prefix as placeholder for playback file
                             "sample_rate": config["sample_rate"],
                             "files": files
                         })
         
         return jsonify(recordings)
     except Exception as e:
-        logger.error(f"Error getting recording history: {e}")
+        logger.error(f"Error getting recording history: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/v1/recordings/<path:filename>', methods=['GET'])

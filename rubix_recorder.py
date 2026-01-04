@@ -143,16 +143,44 @@ class AudioRecorder:
                 if loops_needed > 1:
                     looped_data = np.tile(playback_data, (loops_needed, 1))
                     playback_length = int(self.duration * playback_sr)
-                    sd.play(
-                        looped_data[:playback_length], 
-                        playback_sr,
-                        device=output_id
-                    )
+                    try:
+                        sd.play(
+                            looped_data[:playback_length],
+                            playback_sr,
+                            device=output_id
+                        )
+                    except TypeError as e:
+                        if "callbackoptions" in str(e).lower():
+                            print("  Warning: Sounddevice callbackoptions error, retrying with different parameters")
+                            sd.play(
+                                looped_data[:playback_length],
+                                playback_sr,
+                                device=output_id,
+                                blocking=False
+                            )
+                        else:
+                            raise
                 else:
                     sd.play(playback_data, playback_sr, device=output_id)
                 print("  Playback started on Rubix44 outputs")
+            except TypeError as e:
+                if "callbackoptions" in str(e).lower():
+                    print("  Warning: Sounddevice callbackoptions error, retrying with different parameters")
+                    if loops_needed > 1:
+                        sd.play(
+                            looped_data[:playback_length],
+                            playback_sr,
+                            device=output_id,
+                            blocking=False
+                        )
+                    else:
+                        sd.play(playback_data, playback_sr, device=output_id, blocking=False)
+                else:
+                    raise
             except Exception as e:
                 print(f"  Error starting playback: {e}")
+                import traceback
+                traceback.print_exc()
         
         try:
             print("\nStarting recording and playback...")
@@ -166,12 +194,25 @@ class AudioRecorder:
             time.sleep(0.1)
             
             # Start recording
-            self.recording = sd.rec(
-                int(self.duration * self.sample_rate),
-                samplerate=self.sample_rate,
-                channels=2,
-                device=input_id
-            )
+            try:
+                self.recording = sd.rec(
+                    int(self.duration * self.sample_rate),
+                    samplerate=self.sample_rate,
+                    channels=2,
+                    device=input_id
+                )
+            except TypeError as e:
+                if "callbackoptions" in str(e).lower():
+                    print("  Warning: Sounddevice callbackoptions error in recording, retrying with different parameters")
+                    self.recording = sd.rec(
+                        int(self.duration * self.sample_rate),
+                        samplerate=self.sample_rate,
+                        channels=2,
+                        device=input_id,
+                        blocking=False
+                    )
+                else:
+                    raise
             
             # Wait for recording to complete
             print("Recording in progress... Press Ctrl+C to stop early")
@@ -180,15 +221,27 @@ class AudioRecorder:
             start_time = time.time()
             while not self.should_stop and (time.time() - start_time) < self.duration:
                 time.sleep(0.1)  # Check every 100ms
-                if sd.get_status()['active'] == 0:  # Recording finished naturally
+                try:
+                    status = sd.get_status()
+                    if isinstance(status, dict) and status.get('active', 0) == 0:  # Recording finished naturally
+                        break
+                except Exception as e:
+                    print(f"Warning: Could not get sounddevice status: {e}")
+                    # Continue anyway, we'll rely on the time-based check
                     break
             
             # If stop was requested, stop the recording
             if self.should_stop:
                 print("\n\nRecording stopped by API request")
-                sd.stop()
+                try:
+                    sd.stop()
+                except Exception as e:
+                    print(f"  Warning: Error stopping recording: {e}")
             else:
-                sd.wait()  # Wait for natural completion
+                try:
+                    sd.wait()  # Wait for natural completion
+                except Exception as e:
+                    print(f"  Warning: Error waiting for recording completion: {e}")
             
             print("Recording complete! Saving files...")
             
@@ -210,7 +263,10 @@ class AudioRecorder:
             
         except KeyboardInterrupt:
             print("\n\nRecording interrupted by user")
-            sd.stop()
+            try:
+                sd.stop()
+            except Exception as e:
+                print(f"  Warning: Error stopping recording: {e}")
             return False
         except Exception as e:
             print(f"\nError during recording: {e}")
