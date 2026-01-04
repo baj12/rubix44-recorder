@@ -101,7 +101,8 @@ class RecordingSession:
     """Represents a recording session"""
     def __init__(self, playback_file, duration=None, sample_rate=None, output_prefix=None):
         self.id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.playback_file = playback_file
+        self.playback_file_path = playback_file  # Full path to the playback file
+        self.playback_file = os.path.basename(playback_file)  # Just the filename for API responses
         self.start_time = None
         self.end_time = None
         self.duration = duration or config["default_duration"]
@@ -161,7 +162,7 @@ def start_recording_in_thread(session):
         
         # Start recording with playback
         success = recorder.record_with_playback(
-            session.playback_file,
+            session.playback_file_path,  # Use the full path
             session.output_prefix
         )
         
@@ -385,7 +386,7 @@ def start_recording():
     
     # Create recording session
     session = RecordingSession(
-        playback_file=os.path.basename(playback_file),  # Store just the filename
+        playback_file=playback_file,  # Store the full path
         duration=data.get('duration'),
         sample_rate=data.get('sample_rate'),
         output_prefix=data.get('output_prefix')
