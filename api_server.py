@@ -175,7 +175,6 @@ def start_recording_in_thread(session):
             session.end_time = datetime.now()
     finally:
         with recording_lock:
-            global current_recording_session
             current_recording_session = None
 
 @app.route('/api/v1/health', methods=['GET'])
