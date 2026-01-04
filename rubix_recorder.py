@@ -4,13 +4,16 @@ Automated audio recorder for Rubix44
 Records two channels while playing back a WAV file through Rubix44
 """
 
-import sounddevice as sd
-import soundfile as sf
-import numpy as np
-from datetime import datetime
 import argparse
 import sys
 import threading
+import time
+from datetime import datetime
+
+import numpy as np
+import sounddevice as sd
+import soundfile as sf
+
 
 class AudioRecorder:
     def __init__(self, input_device=None, output_device=None, duration=3600, sample_rate=44100):
@@ -28,6 +31,7 @@ class AudioRecorder:
         self.duration = duration
         self.sample_rate = sample_rate
         self.recording = None
+        self.should_stop = False
         
     def find_device(self, search_term='rubix', device_type='input'):
         """
@@ -49,6 +53,12 @@ class AudioRecorder:
                     if device['max_input_channels'] > 0 and device['max_output_channels'] > 0:
                         return i
         return None
+    
+    def stop_recording(self):
+        """
+        Signal that recording should be stopped
+        """
+        self.should_stop = True
     
     def record_with_playback(self, playback_file, output_prefix='recording'):
         """
@@ -165,7 +175,20 @@ class AudioRecorder:
             
             # Wait for recording to complete
             print("Recording in progress... Press Ctrl+C to stop early")
-            sd.wait()
+            # Check for stop signal periodically
+            import time
+            start_time = time.time()
+            while not self.should_stop and (time.time() - start_time) < self.duration:
+                time.sleep(0.1)  # Check every 100ms
+                if sd.get_status()['active'] == 0:  # Recording finished naturally
+                    break
+            
+            # If stop was requested, stop the recording
+            if self.should_stop:
+                print("\n\nRecording stopped by API request")
+                sd.stop()
+            else:
+                sd.wait()  # Wait for natural completion
             
             print("Recording complete! Saving files...")
             
@@ -256,5 +279,7 @@ def main():
     
     recorder.record_with_playback(args.playback_file, args.output)
 
+if __name__ == '__main__':
+    main()
 if __name__ == '__main__':
     main()

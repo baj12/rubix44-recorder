@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -106,12 +107,20 @@ class RecordingSession:
         self.duration = duration or config["default_duration"]
         self.sample_rate = sample_rate or config["sample_rate"]
         self.output_prefix = output_prefix or config["output_prefix"]
-        self.status = "initialized"  # initialized, recording, completed, error
+        self.status = "initialized"  # initialized, recording, completed, error, stopped
         self.files = []
         self.error = None
+        self.recorder = None  # Reference to the AudioRecorder instance
+        self.actual_duration = 0  # Actual recording duration in seconds
+        
+    def get_elapsed_seconds(self):
+        """Calculate elapsed seconds since recording started"""
+        if self.start_time and self.status == "recording":
+            return (datetime.now() - self.start_time).total_seconds()
+        return 0
         
     def to_dict(self):
-        return {
+        result = {
             "id": self.id,
             "playback_file": self.playback_file,
             "start_time": self.start_time.isoformat() if self.start_time else None,
@@ -123,6 +132,13 @@ class RecordingSession:
             "files": self.files,
             "error": self.error
         }
+        
+        # Add elapsed time if recording is in progress
+        if self.status == "recording" and self.start_time:
+            result["elapsed_seconds"] = self.get_elapsed_seconds()
+            result["expected_duration"] = self.duration
+        
+        return result
 
 def start_recording_in_thread(session):
     """Start recording in a separate thread"""
@@ -140,6 +156,9 @@ def start_recording_in_thread(session):
             sample_rate=session.sample_rate
         )
         
+        # Store recorder reference in session
+        session.recorder = recorder
+        
         # Start recording with playback
         success = recorder.record_with_playback(
             session.playback_file,
@@ -147,9 +166,16 @@ def start_recording_in_thread(session):
         )
         
         with recording_lock:
-            if success:
-                session.status = "completed"
+            if success or session.status == "stopped":  # Accept both completed and stopped
+                if session.status != "stopped":
+                    session.status = "completed"
                 session.end_time = datetime.now()
+                
+                # Calculate actual duration
+                if session.start_time and session.end_time:
+                    actual_duration = (session.end_time - session.start_time).total_seconds()
+                else:
+                    actual_duration = session.duration
                 
                 # Collect generated files
                 timestamp = session.start_time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -161,8 +187,21 @@ def start_recording_in_thread(session):
                     f"{base_path}_ch2.wav"
                 ]
                 
-                # Verify files exist
-                session.files = [f for f in session.files if os.path.exists(f)]
+                # Verify files exist and add metadata
+                verified_files = []
+                for file_path in session.files:
+                    if os.path.exists(file_path):
+                        stat = os.stat(file_path)
+                        verified_files.append({
+                            "name": os.path.basename(file_path),
+                            "path": file_path,
+                            "size": stat.st_size,
+                            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                        })
+                session.files = verified_files
+                
+                # Add duration to session for history
+                session.actual_duration = actual_duration
             else:
                 session.status = "error"
                 session.error = "Recording failed"
@@ -273,7 +312,7 @@ def find_rubix_device():
 
 @app.route('/api/v1/playback-files', methods=['GET'])
 def list_playback_files():
-    """List all available playback files"""
+    """List all available playback files with metadata"""
     try:
         files = []
         playback_dir = config["playback_directory"]
@@ -283,10 +322,31 @@ def list_playback_files():
                 if filename.lower().endswith('.wav'):
                     filepath = os.path.join(playback_dir, filename)
                     stat = os.stat(filepath)
+                    
+                    # Try to get audio file metadata
+                    duration_seconds = 0
+                    sample_rate = config["sample_rate"]
+                    channels = 2
+                    format = "WAV"
+                    
+                    try:
+                        import soundfile as sf
+                        info = sf.info(filepath)
+                        duration_seconds = info.duration
+                        sample_rate = info.samplerate
+                        channels = info.channels
+                    except Exception:
+                        # If we can't read the file, use defaults
+                        pass
+                    
                     files.append({
-                        "name": filename,
+                        "filename": filename,
                         "path": filepath,
                         "size": stat.st_size,
+                        "duration_seconds": duration_seconds,
+                        "sample_rate": sample_rate,
+                        "channels": channels,
+                        "format": format,
                         "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
                     })
         
@@ -325,7 +385,7 @@ def start_recording():
     
     # Create recording session
     session = RecordingSession(
-        playback_file=playback_file,
+        playback_file=os.path.basename(playback_file),  # Store just the filename
         duration=data.get('duration'),
         sample_rate=data.get('sample_rate'),
         output_prefix=data.get('output_prefix')
@@ -352,15 +412,45 @@ def stop_recording():
         if not current_recording_session or current_recording_session.status != "recording":
             return jsonify({"error": "No active recording session"}), 400
         
-        # For now, we'll just mark it as stopped
-        # In a real implementation, we'd need to interrupt the recording
+        # Signal the recorder to stop
+        if current_recording_session.recorder:
+            current_recording_session.recorder.stop_recording()
+        
+        # Mark as stopped and set end time
         current_recording_session.status = "stopped"
         current_recording_session.end_time = datetime.now()
         
+        # Calculate actual duration
+        if current_recording_session.start_time and current_recording_session.end_time:
+            actual_duration = (current_recording_session.end_time - current_recording_session.start_time).total_seconds()
+        else:
+            actual_duration = 0
+        
+        # Prepare response with actual files
+        files_response = []
+        if current_recording_session.files:
+            files_response = current_recording_session.files
+        else:
+            # Try to collect files even if recording was stopped early
+            timestamp = current_recording_session.start_time.strftime("%Y-%m-%d_%H-%M-%S") if current_recording_session.start_time else ""
+            if timestamp:
+                base_path = f"{config['recordings_directory']}/{current_recording_session.output_prefix}_{timestamp}"
+                for channel in ['_stereo.wav', '_ch1.wav', '_ch2.wav']:
+                    file_path = base_path + channel
+                    if os.path.exists(file_path):
+                        stat = os.stat(file_path)
+                        files_response.append({
+                            "name": os.path.basename(file_path),
+                            "path": file_path,
+                            "size": stat.st_size
+                        })
+        
         logger.info(f"Stopped recording session {current_recording_session.id}")
         return jsonify({
-            "message": "Recording stopped",
-            "session": current_recording_session.to_dict()
+            "success": True,
+            "session_id": current_recording_session.id,
+            "files": files_response,
+            "duration_seconds": actual_duration
         })
 
 @app.route('/api/v1/recordings/status', methods=['GET'])
@@ -403,10 +493,31 @@ def get_recording_history():
                                     "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
                                 })
                         
+                        # Try to extract additional metadata from session info
+                        # For now, we'll use default values and extract what we can
+                        start_time_str = f"{timestamp.replace('_', 'T').replace('-', ':')}"
+                        end_time_str = start_time_str  # We don't have actual end time
+                        
+                        # Try to get duration from file if possible
+                        duration_seconds = 0
+                        if files:
+                            # Estimate duration from file size (rough approximation)
+                            # For 16-bit stereo at 44.1kHz: ~176,400 bytes per second
+                            stereo_file = next((f for f in files if 'stereo' in f['name']), None)
+                            if stereo_file:
+                                # Rough estimation: bytes / (2 channels * 2 bytes/sample * sample_rate)
+                                estimated_duration = stereo_file['size'] / (2 * 2 * config["sample_rate"])
+                                duration_seconds = max(0, estimated_duration)
+                        
                         recordings.append({
                             "id": f"{prefix}_{timestamp}",
                             "prefix": prefix,
                             "timestamp": timestamp,
+                            "start_time": start_time_str,
+                            "end_time": end_time_str,
+                            "duration_seconds": duration_seconds,
+                            "playback_file": "unknown",
+                            "sample_rate": config["sample_rate"],
                             "files": files
                         })
         
