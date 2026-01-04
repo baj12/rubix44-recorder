@@ -42,10 +42,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Enable debug logging for remote debugging
-if config.get("debug", False):
-    logging.getLogger().setLevel(logging.DEBUG)
-
 # Create logs directory if it doesn't exist
 os.makedirs('logs', exist_ok=True)
 
@@ -94,13 +90,17 @@ def save_config(config):
         logger.error(f"Error saving config file: {e}")
         return False
 
+
 # Load configuration
 config = load_config()
+
+# Enable debug logging for remote debugging
+if config.get("debug", False):
+    logging.getLogger().setLevel(logging.DEBUG)
 
 # Ensure directories exist
 os.makedirs(config["playback_directory"], exist_ok=True)
 os.makedirs(config["recordings_directory"], exist_ok=True)
-
 class RecordingSession:
     """Represents a recording session"""
     def __init__(self, playback_file, duration=None, sample_rate=None, output_prefix=None):
