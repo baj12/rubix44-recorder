@@ -65,7 +65,16 @@ DEFAULT_CONFIG = {
     "sample_rate": 44100,
     "output_prefix": "api_recording",
     "playback_directory": "playback_files",
-    "recordings_directory": "recordings"
+    "recordings_directory": "recordings",
+    "storage_server": {
+        "enabled": False,
+        "host": "",
+        "port": 22,
+        "protocol": "scp",  # scp, sftp, rsync, http
+        "username": "",
+        "remote_path": "",
+        "auto_transfer": False  # Automatically transfer after recording completes
+    }
 }
 
 def load_config():
@@ -682,6 +691,242 @@ def download_recording(filename):
     except Exception as e:
         logger.error(f"Error downloading file {filename}: {e}")
         return jsonify({"error": "File not found"}), 404
+
+@app.route('/api/v1/recordings/delete', methods=['POST'])
+def delete_recording():
+    """Delete a recording session (all associated files)"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        session_id = data.get('session_id')
+        if not session_id:
+            return jsonify({"error": "session_id is required"}), 400
+
+        # Find files matching the session_id pattern
+        recordings_dir = config["recordings_directory"]
+        deleted_files = []
+        not_found = []
+
+        # Common patterns for session files
+        patterns = [
+            f"*{session_id}_stereo.wav",
+            f"*{session_id}_ch1.wav",
+            f"*{session_id}_ch2.wav"
+        ]
+
+        import glob
+        for pattern in patterns:
+            file_pattern = os.path.join(recordings_dir, pattern)
+            matching_files = glob.glob(file_pattern)
+
+            for file_path in matching_files:
+                try:
+                    os.remove(file_path)
+                    deleted_files.append(os.path.basename(file_path))
+                    logger.info(f"Deleted file: {file_path}")
+                except Exception as e:
+                    logger.error(f"Error deleting file {file_path}: {e}")
+                    not_found.append(os.path.basename(file_path))
+
+        if not deleted_files and not not_found:
+            return jsonify({"error": f"No files found for session_id: {session_id}"}), 404
+
+        return jsonify({
+            "success": True,
+            "session_id": session_id,
+            "deleted_files": deleted_files,
+            "failed_files": not_found,
+            "deleted_count": len(deleted_files)
+        })
+
+    except Exception as e:
+        logger.error(f"Error deleting recording: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/recordings/transfer', methods=['POST'])
+def transfer_recording():
+    """Transfer a recording session to the configured storage server"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        session_id = data.get('session_id')
+        if not session_id:
+            return jsonify({"error": "session_id is required"}), 400
+
+        # Check if storage server is configured
+        storage_config = config.get("storage_server", {})
+        if not storage_config.get("enabled"):
+            return jsonify({"error": "Storage server not configured or disabled"}), 400
+
+        # Validate storage configuration
+        required_fields = ["host", "username", "remote_path"]
+        missing_fields = [field for field in required_fields if not storage_config.get(field)]
+        if missing_fields:
+            return jsonify({
+                "error": f"Storage server configuration incomplete. Missing: {', '.join(missing_fields)}"
+            }), 400
+
+        # Find files matching the session_id
+        recordings_dir = config["recordings_directory"]
+        files_to_transfer = []
+
+        import glob
+        patterns = [
+            f"*{session_id}_stereo.wav",
+            f"*{session_id}_ch1.wav",
+            f"*{session_id}_ch2.wav"
+        ]
+
+        for pattern in patterns:
+            file_pattern = os.path.join(recordings_dir, pattern)
+            matching_files = glob.glob(file_pattern)
+            files_to_transfer.extend(matching_files)
+
+        if not files_to_transfer:
+            return jsonify({"error": f"No files found for session_id: {session_id}"}), 404
+
+        # Transfer files based on protocol
+        protocol = storage_config.get("protocol", "scp")
+        transferred_files = []
+        failed_files = []
+
+        for file_path in files_to_transfer:
+            filename = os.path.basename(file_path)
+            try:
+                if protocol in ["scp", "sftp"]:
+                    # Use scp/sftp command
+                    remote_file = f"{storage_config['remote_path']}/{filename}"
+                    remote_host = f"{storage_config['username']}@{storage_config['host']}"
+
+                    if protocol == "scp":
+                        import subprocess
+                        cmd = ["scp", "-P", str(storage_config.get('port', 22)), file_path, f"{remote_host}:{remote_file}"]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+                        if result.returncode == 0:
+                            transferred_files.append(filename)
+                            logger.info(f"Transferred {filename} to {remote_host}:{remote_file}")
+                        else:
+                            failed_files.append({"file": filename, "error": result.stderr})
+                            logger.error(f"Failed to transfer {filename}: {result.stderr}")
+
+                    elif protocol == "sftp":
+                        # SFTP implementation would go here
+                        # For now, return not implemented
+                        failed_files.append({"file": filename, "error": "SFTP not yet implemented"})
+
+                elif protocol == "rsync":
+                    # Rsync implementation
+                    import subprocess
+                    remote_host = f"{storage_config['username']}@{storage_config['host']}"
+                    remote_path = f"{remote_host}:{storage_config['remote_path']}/"
+
+                    cmd = ["rsync", "-avz", "-e", f"ssh -p {storage_config.get('port', 22)}", file_path, remote_path]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+                    if result.returncode == 0:
+                        transferred_files.append(filename)
+                        logger.info(f"Transferred {filename} via rsync to {remote_path}")
+                    else:
+                        failed_files.append({"file": filename, "error": result.stderr})
+                        logger.error(f"Failed to rsync {filename}: {result.stderr}")
+
+                elif protocol == "http":
+                    # HTTP POST upload
+                    import requests
+                    upload_url = f"http://{storage_config['host']}:{storage_config.get('port', 80)}{storage_config['remote_path']}"
+
+                    with open(file_path, 'rb') as f:
+                        files = {'file': (filename, f)}
+                        response = requests.post(upload_url, files=files, timeout=300)
+
+                        if response.status_code == 200:
+                            transferred_files.append(filename)
+                            logger.info(f"Uploaded {filename} to {upload_url}")
+                        else:
+                            failed_files.append({"file": filename, "error": f"HTTP {response.status_code}: {response.text}"})
+                            logger.error(f"Failed to upload {filename}: HTTP {response.status_code}")
+                else:
+                    failed_files.append({"file": filename, "error": f"Unsupported protocol: {protocol}"})
+
+            except Exception as e:
+                failed_files.append({"file": filename, "error": str(e)})
+                logger.error(f"Error transferring {filename}: {e}", exc_info=True)
+
+        # Optionally delete local files after successful transfer
+        delete_after_transfer = data.get('delete_after_transfer', False)
+        deleted_files = []
+
+        if delete_after_transfer and transferred_files:
+            for file_path in files_to_transfer:
+                filename = os.path.basename(file_path)
+                if filename in transferred_files:
+                    try:
+                        os.remove(file_path)
+                        deleted_files.append(filename)
+                        logger.info(f"Deleted local file after transfer: {file_path}")
+                    except Exception as e:
+                        logger.error(f"Error deleting {file_path} after transfer: {e}")
+
+        return jsonify({
+            "success": len(transferred_files) > 0,
+            "session_id": session_id,
+            "transferred_files": transferred_files,
+            "failed_files": failed_files,
+            "deleted_files": deleted_files,
+            "transfer_count": len(transferred_files),
+            "protocol": protocol,
+            "destination": f"{storage_config['username']}@{storage_config['host']}:{storage_config['remote_path']}"
+        })
+
+    except Exception as e:
+        logger.error(f"Error transferring recording: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/storage/config', methods=['GET'])
+def get_storage_config():
+    """Get storage server configuration (without sensitive data)"""
+    storage_config = config.get("storage_server", {}).copy()
+    # Don't expose password if it exists
+    if "password" in storage_config:
+        storage_config["password"] = "***"
+    return jsonify(storage_config)
+
+@app.route('/api/v1/storage/config', methods=['PUT'])
+def update_storage_config():
+    """Update storage server configuration"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+
+        # Update storage_server section in config
+        if "storage_server" not in config:
+            config["storage_server"] = {}
+
+        config["storage_server"].update(data)
+
+        # Save to file
+        if save_config(config):
+            # Return config without sensitive data
+            safe_config = config["storage_server"].copy()
+            if "password" in safe_config:
+                safe_config["password"] = "***"
+
+            return jsonify({
+                "message": "Storage configuration updated",
+                "storage_config": safe_config
+            })
+        else:
+            return jsonify({"error": "Failed to save configuration"}), 500
+
+    except Exception as e:
+        logger.error(f"Error updating storage config: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 def main():
     """Main entry point"""

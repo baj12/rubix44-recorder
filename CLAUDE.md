@@ -180,6 +180,13 @@ Example response when recording:
 - `POST /api/v1/recordings/stop` - Stop current recording
 - `GET /api/v1/recordings/status` - Get current session status
 - `GET /api/v1/recordings/history` - List past recordings
+- `POST /api/v1/recordings/delete` - Delete a recording session
+  - Accepts: `session_id` (technical ID like `20251130_143045`)
+  - Deletes all associated files (stereo, ch1, ch2)
+- `POST /api/v1/recordings/transfer` - Transfer recording to storage server
+  - Accepts: `session_id`, `delete_after_transfer` (optional, default: false)
+  - Transfers files using configured protocol (scp, rsync, http)
+  - Optionally deletes local files after successful transfer
 
 #### Device Information
 - `GET /api/v1/devices` - List all audio devices
@@ -188,6 +195,12 @@ Example response when recording:
 #### Playback Files
 - `GET /api/v1/playback-files` - List available playback files with metadata (duration, sample rate, channels)
 
+#### Storage Server Management
+- `GET /api/v1/storage/config` - Get storage server configuration
+- `PUT /api/v1/storage/config` - Update storage server configuration
+  - Accepts: `enabled`, `host`, `port`, `protocol`, `username`, `remote_path`, `auto_transfer`
+  - Supported protocols: `scp`, `sftp`, `rsync`, `http`
+
 ### Human-Readable Session IDs
 
 Each recording session gets two identifiers:
@@ -195,3 +208,30 @@ Each recording session gets two identifiers:
 2. **Human ID** (`human_id`): Memorable format like `swift-panda-2347`
 
 The human ID makes it easier to reference and discuss specific recording sessions.
+
+### Storage Server Configuration
+
+The API supports automatic or manual transfer of recordings to a remote storage server. Configure via the `/api/v1/storage/config` endpoint:
+
+```json
+{
+  "enabled": true,
+  "host": "storage.example.com",
+  "port": 22,
+  "protocol": "scp",
+  "username": "recorder",
+  "remote_path": "/data/recordings",
+  "auto_transfer": false
+}
+```
+
+**Supported protocols:**
+- `scp` - Secure copy (requires SSH keys or password-less auth)
+- `rsync` - Rsync over SSH (efficient for multiple files)
+- `http` - HTTP POST upload to a web server
+- `sftp` - SFTP transfer (not yet implemented)
+
+**Usage:**
+- Set `auto_transfer: true` to automatically transfer recordings after completion
+- Use `/api/v1/recordings/transfer` endpoint to manually transfer specific sessions
+- Add `delete_after_transfer: true` to remove local files after successful transfer
