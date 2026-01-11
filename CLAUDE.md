@@ -116,3 +116,82 @@ All recordings are saved as WAV files with:
 - Bit depth: Determined by soundfile library (typically 16-bit or 24-bit)
 - Channels: 2 (stereo)
 - Filenames include timestamp: `YYYY-MM-DD_HH-MM-SS`
+
+## API Server
+
+The project includes a RESTful API server ([api_server.py](api_server.py)) for remote control of recording sessions.
+
+### Running the API Server
+
+```bash
+# Activate environment
+conda activate rubix-recorder-api
+
+# Start the server
+python api_server.py
+
+# Server runs on http://0.0.0.0:5000 by default
+```
+
+### Key API Endpoints
+
+#### Complete Status - `GET /api/v1/status`
+Comprehensive endpoint that provides:
+- **Rubix Connection Status**: Whether Rubix44 is connected, with input/output device details (ID, name, channels, sample rate)
+- **Current Recording Session**: Full session details if recording is in progress
+- **System Configuration**: Default settings for duration, sample rate, output paths
+
+Example response when recording:
+```json
+{
+  "timestamp": "2025-11-30T14:30:45.123456",
+  "service": "Rubix Recorder API",
+  "version": "1.0.0",
+  "rubix": {
+    "connected": true,
+    "input_device": {
+      "id": 2,
+      "name": "Rubix44",
+      "channels": 4,
+      "sample_rate": 44100
+    },
+    "output_device": { ... }
+  },
+  "recording": {
+    "id": "20251130_143045",
+    "human_id": "swift-panda-2347",
+    "status": "recording",
+    "playback_file": "test.wav",
+    "duration": 3600,
+    "sample_rate": 44100,
+    "channels": 2,
+    "elapsed_seconds": 125.4,
+    "progress_percent": 3.48,
+    ...
+  },
+  "config": { ... }
+}
+```
+
+#### Recording Management
+- `POST /api/v1/recordings/start` - Start a new recording session
+  - Accepts: `playback_file`, `duration`, `sample_rate`, `output_prefix`, `input_device`, `output_device`
+  - Returns: Session info with unique `id` and human-readable `human_id`
+- `POST /api/v1/recordings/stop` - Stop current recording
+- `GET /api/v1/recordings/status` - Get current session status
+- `GET /api/v1/recordings/history` - List past recordings
+
+#### Device Information
+- `GET /api/v1/devices` - List all audio devices
+- `GET /api/v1/devices/rubix` - Find Rubix44 device specifically
+
+#### Playback Files
+- `GET /api/v1/playback-files` - List available playback files with metadata (duration, sample rate, channels)
+
+### Human-Readable Session IDs
+
+Each recording session gets two identifiers:
+1. **Technical ID** (`id`): Timestamp-based like `20251130_143045`
+2. **Human ID** (`human_id`): Memorable format like `swift-panda-2347`
+
+The human ID makes it easier to reference and discuss specific recording sessions.

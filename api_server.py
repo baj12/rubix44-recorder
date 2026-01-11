@@ -7,6 +7,7 @@ Provides HTTP endpoints to control recording sessions remotely.
 import json
 import logging
 import os
+import random
 import sys
 import threading
 import time
@@ -101,10 +102,35 @@ if config.get("debug", False):
 # Ensure directories exist
 os.makedirs(config["playback_directory"], exist_ok=True)
 os.makedirs(config["recordings_directory"], exist_ok=True)
+
+# Word lists for human-readable identifiers
+ADJECTIVES = [
+    'swift', 'bright', 'calm', 'bold', 'clear', 'deep', 'eager', 'fair',
+    'gentle', 'happy', 'keen', 'light', 'merry', 'noble', 'quick', 'warm',
+    'wise', 'brave', 'cool', 'deft', 'fine', 'grand', 'jolly', 'kind',
+    'lively', 'proud', 'sharp', 'smooth', 'sound', 'sweet', 'vital', 'wild'
+]
+
+NOUNS = [
+    'panda', 'tiger', 'eagle', 'dolphin', 'falcon', 'phoenix', 'dragon', 'wolf',
+    'bear', 'hawk', 'lynx', 'otter', 'raven', 'seal', 'swan', 'whale',
+    'bison', 'crane', 'deer', 'fox', 'heron', 'jaguar', 'koala', 'lion',
+    'moose', 'owl', 'panther', 'quail', 'robin', 'stork', 'turtle', 'viper'
+]
+
+def generate_human_readable_id():
+    """Generate a human-readable identifier like 'swift-panda-2347'"""
+    adjective = random.choice(ADJECTIVES)
+    noun = random.choice(NOUNS)
+    number = random.randint(1000, 9999)
+    return f"{adjective}-{noun}-{number}"
+
 class RecordingSession:
     """Represents a recording session"""
-    def __init__(self, playback_file, duration=None, sample_rate=None, output_prefix=None):
+    def __init__(self, playback_file, duration=None, sample_rate=None, output_prefix=None,
+                 input_device=None, output_device=None):
         self.id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.human_id = generate_human_readable_id()  # Human-readable unique identifier
         self.playback_file_path = playback_file  # Full path to the playback file
         self.playback_file = os.path.basename(playback_file)  # Just the filename for API responses
         self.start_time = None
@@ -112,11 +138,14 @@ class RecordingSession:
         self.duration = duration or config["default_duration"]
         self.sample_rate = sample_rate or config["sample_rate"]
         self.output_prefix = output_prefix or config["output_prefix"]
+        self.input_device = input_device  # Device ID or name for input
+        self.output_device = output_device  # Device ID or name for output
         self.status = "initialized"  # initialized, recording, completed, error, stopped
         self.files = []
         self.error = None
         self.recorder = None  # Reference to the AudioRecorder instance
         self.actual_duration = 0  # Actual recording duration in seconds
+        self.channels = 2  # Number of recording channels
         
     def get_elapsed_seconds(self):
         """Calculate elapsed seconds since recording started"""
@@ -127,22 +156,27 @@ class RecordingSession:
     def to_dict(self):
         result = {
             "id": self.id,
+            "human_id": self.human_id,
             "playback_file": self.playback_file,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "duration": self.duration,
             "sample_rate": self.sample_rate,
+            "channels": self.channels,
             "output_prefix": self.output_prefix,
+            "input_device": self.input_device,
+            "output_device": self.output_device,
             "status": self.status,
             "files": self.files,
             "error": self.error
         }
-        
+
         # Add elapsed time if recording is in progress
         if self.status == "recording" and self.start_time:
             result["elapsed_seconds"] = self.get_elapsed_seconds()
             result["expected_duration"] = self.duration
-        
+            result["progress_percent"] = (self.get_elapsed_seconds() / self.duration * 100) if self.duration > 0 else 0
+
         return result
 
 def start_recording_in_thread(session):
@@ -160,6 +194,8 @@ def start_recording_in_thread(session):
         # Create recorder instance
         logger.debug(f"Creating AudioRecorder with duration={session.duration}, sample_rate={session.sample_rate}")
         recorder = AudioRecorder(
+            input_device=session.input_device,
+            output_device=session.output_device,
             duration=session.duration,
             sample_rate=session.sample_rate
         )
@@ -422,9 +458,11 @@ def start_recording():
         playback_file=playback_file,  # Store the full path
         duration=data.get('duration'),
         sample_rate=data.get('sample_rate'),
-        output_prefix=data.get('output_prefix')
+        output_prefix=data.get('output_prefix'),
+        input_device=data.get('input_device'),
+        output_device=data.get('output_device')
     )
-    logger.debug(f"Created session with ID: {session.id}")
+    logger.debug(f"Created session with ID: {session.id} (human ID: {session.human_id})")
     
     # Start recording in background thread
     logger.debug("Starting recording thread")
@@ -498,6 +536,79 @@ def get_recording_status():
             return jsonify(current_recording_session.to_dict())
         else:
             return jsonify({"status": "idle", "message": "No active recording session"})
+
+@app.route('/api/v1/status', methods=['GET'])
+def get_complete_status():
+    """Get complete system status including Rubix connection, recording state, and parameters"""
+    try:
+        import sounddevice as sd
+
+        # Check Rubix connection
+        recorder = AudioRecorder()
+        rubix_input_id = recorder.find_device('rubix', 'input')
+        rubix_output_id = recorder.find_device('rubix', 'output')
+
+        rubix_status = {
+            "connected": rubix_input_id is not None or rubix_output_id is not None,
+            "input_device": None,
+            "output_device": None
+        }
+
+        # Get detailed device information if Rubix is connected
+        if rubix_input_id is not None:
+            input_device = sd.query_devices(rubix_input_id)
+            rubix_status["input_device"] = {
+                "id": rubix_input_id,
+                "name": input_device['name'],
+                "channels": input_device['max_input_channels'],
+                "sample_rate": input_device['default_samplerate']
+            }
+
+        if rubix_output_id is not None:
+            output_device = sd.query_devices(rubix_output_id)
+            rubix_status["output_device"] = {
+                "id": rubix_output_id,
+                "name": output_device['name'],
+                "channels": output_device['max_output_channels'],
+                "sample_rate": output_device['default_samplerate']
+            }
+
+        # Get current recording session status
+        recording_status = None
+        with recording_lock:
+            if current_recording_session:
+                recording_status = current_recording_session.to_dict()
+            else:
+                recording_status = {
+                    "status": "idle",
+                    "message": "No active recording session"
+                }
+
+        # Build complete status response
+        status = {
+            "timestamp": datetime.now().isoformat(),
+            "service": "Rubix Recorder API",
+            "version": "1.0.0",
+            "rubix": rubix_status,
+            "recording": recording_status,
+            "config": {
+                "default_duration": config["default_duration"],
+                "sample_rate": config["sample_rate"],
+                "output_prefix": config["output_prefix"],
+                "playback_directory": config["playback_directory"],
+                "recordings_directory": config["recordings_directory"]
+            }
+        }
+
+        return jsonify(status)
+
+    except Exception as e:
+        logger.error(f"Error getting complete status: {e}", exc_info=True)
+        return jsonify({
+            "error": str(e),
+            "timestamp": datetime.now().isoformat(),
+            "service": "Rubix Recorder API"
+        }), 500
 
 @app.route('/api/v1/recordings/history', methods=['GET'])
 def get_recording_history():
