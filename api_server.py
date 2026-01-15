@@ -4,6 +4,7 @@ RESTful API Server for Rubix44 Audio Recorder
 Provides HTTP endpoints to control recording sessions remotely.
 """
 
+import copy
 import json
 import logging
 import os
@@ -79,7 +80,7 @@ DEFAULT_CONFIG = {
 
 def load_config():
     """Load configuration from file or use defaults"""
-    config = DEFAULT_CONFIG.copy()
+    config = copy.deepcopy(DEFAULT_CONFIG)  # Use deep copy to avoid modifying DEFAULT_CONFIG
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r') as f:
@@ -890,7 +891,7 @@ def transfer_recording():
 @app.route('/api/v1/storage/config', methods=['GET'])
 def get_storage_config():
     """Get storage server configuration (without sensitive data)"""
-    storage_config = config.get("storage_server", {}).copy()
+    storage_config = copy.deepcopy(config.get("storage_server", {}))
     # Don't expose password if it exists
     if "password" in storage_config:
         storage_config["password"] = "***"
@@ -913,7 +914,7 @@ def update_storage_config():
         # Save to file
         if save_config(config):
             # Return config without sensitive data
-            safe_config = config["storage_server"].copy()
+            safe_config = copy.deepcopy(config["storage_server"])
             if "password" in safe_config:
                 safe_config["password"] = "***"
 
