@@ -4,10 +4,10 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - numpy
   - scipy
   - pip
   - pip:
+    - numpy==1.26.4  # Pin to 1.x for AVX compatibility (not AVX2) on older CPUs
     - flask==2.3.3
     - flask-cors==4.0.0
     - sounddevice>=0.4.6
