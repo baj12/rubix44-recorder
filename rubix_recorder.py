@@ -221,14 +221,9 @@ class AudioRecorder:
             start_time = time.time()
             while not self.should_stop and (time.time() - start_time) < self.duration:
                 time.sleep(0.1)  # Check every 100ms
-                try:
-                    status = sd.get_status()
-                    if isinstance(status, dict) and status.get('active', 0) == 0:  # Recording finished naturally
-                        break
-                except Exception as e:
-                    print(f"Warning: Could not get sounddevice status: {e}")
-                    # Continue anyway, we'll rely on the time-based check
-                    break
+                # NOTE: We intentionally DO NOT call sd.get_status() here because it can
+                # block/hang during active recording, freezing the entire Python process.
+                # We rely on time-based checking and let sd.wait() handle completion.
             
             # If stop was requested, stop the recording
             if self.should_stop:
