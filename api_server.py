@@ -551,37 +551,44 @@ def get_recording_status():
 def get_complete_status():
     """Get complete system status including Rubix connection, recording state, and parameters"""
     try:
-        import sounddevice as sd
+        # Fast path: if we're recording, skip device detection to avoid slowdown
+        # We already know devices are connected if recording is active
+        rubix_status = {"connected": False, "input_device": None, "output_device": None}
 
-        # Check Rubix connection
-        recorder = AudioRecorder()
-        rubix_input_id = recorder.find_device('rubix', 'input')
-        rubix_output_id = recorder.find_device('rubix', 'output')
+        with recording_lock:
+            if current_recording_session and current_recording_session.status == "recording":
+                # During recording, assume devices are connected and use cached info
+                rubix_status["connected"] = True
+                # We can infer device info from the session itself
+                if current_recording_session.input_device or current_recording_session.output_device:
+                    rubix_status["note"] = "Device details unavailable during active recording (performance optimization)"
+            else:
+                # Only query devices when NOT recording (to avoid slowdown)
+                import sounddevice as sd
+                recorder = AudioRecorder()
+                rubix_input_id = recorder.find_device('rubix', 'input')
+                rubix_output_id = recorder.find_device('rubix', 'output')
 
-        rubix_status = {
-            "connected": rubix_input_id is not None or rubix_output_id is not None,
-            "input_device": None,
-            "output_device": None
-        }
+                rubix_status["connected"] = rubix_input_id is not None or rubix_output_id is not None
 
-        # Get detailed device information if Rubix is connected
-        if rubix_input_id is not None:
-            input_device = sd.query_devices(rubix_input_id)
-            rubix_status["input_device"] = {
-                "id": rubix_input_id,
-                "name": input_device['name'],
-                "channels": input_device['max_input_channels'],
-                "sample_rate": input_device['default_samplerate']
-            }
+                # Get detailed device information if Rubix is connected
+                if rubix_input_id is not None:
+                    input_device = sd.query_devices(rubix_input_id)
+                    rubix_status["input_device"] = {
+                        "id": rubix_input_id,
+                        "name": input_device['name'],
+                        "channels": input_device['max_input_channels'],
+                        "sample_rate": input_device['default_samplerate']
+                    }
 
-        if rubix_output_id is not None:
-            output_device = sd.query_devices(rubix_output_id)
-            rubix_status["output_device"] = {
-                "id": rubix_output_id,
-                "name": output_device['name'],
-                "channels": output_device['max_output_channels'],
-                "sample_rate": output_device['default_samplerate']
-            }
+                if rubix_output_id is not None:
+                    output_device = sd.query_devices(rubix_output_id)
+                    rubix_status["output_device"] = {
+                        "id": rubix_output_id,
+                        "name": output_device['name'],
+                        "channels": output_device['max_output_channels'],
+                        "sample_rate": output_device['default_samplerate']
+                    }
 
         # Get current recording session status
         recording_status = None
