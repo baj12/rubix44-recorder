@@ -33,19 +33,25 @@ except ImportError as e:
     print("Make sure rubix_recorder.py is in the same directory")
     sys.exit(1)
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/api_server.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+# Import and setup comprehensive logging system
+try:
+    from logging_system import get_logging_system, setup_exception_logging
+    logging_sys = get_logging_system()
+    setup_exception_logging()
+except ImportError:
+    # Fallback to basic logging if logging_system not available
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('logs/api_server.log'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    logging_sys = None
+    os.makedirs('logs', exist_ok=True)
 
-# Create logs directory if it doesn't exist
-os.makedirs('logs', exist_ok=True)
+logger = logging.getLogger(__name__)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -936,23 +942,171 @@ def update_storage_config():
         logger.error(f"Error updating storage config: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
+# ============================================================================
+# LOG MANAGEMENT API ENDPOINTS
+# ============================================================================
+
+@app.route('/api/v1/logs', methods=['GET'])
+def list_logs():
+    """List all log files with metadata"""
+    try:
+        if logging_sys:
+            log_files = logging_sys.get_log_files()
+            return jsonify({
+                "log_files": log_files,
+                "total_files": len(log_files),
+                "total_size_mb": round(sum(f['size'] for f in log_files) / 1024 / 1024, 2)
+            })
+        else:
+            return jsonify({"error": "Logging system not available"}), 503
+    except Exception as e:
+        logger.error(f"Error listing logs: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/logs/<path:filename>', methods=['GET'])
+def read_log(filename):
+    """
+    Read log file content
+
+    Query parameters:
+    - lines: Number of lines to read (default: 100)
+    - offset: Number of lines to skip from end (default: 0)
+    """
+    try:
+        if not logging_sys:
+            return jsonify({"error": "Logging system not available"}), 503
+
+        lines = int(request.args.get('lines', 100))
+        offset = int(request.args.get('offset', 0))
+
+        log_content = logging_sys.read_log(filename, lines=lines, offset=offset)
+
+        return jsonify({
+            "filename": filename,
+            "lines_returned": len(log_content),
+            "content": log_content
+        })
+    except FileNotFoundError:
+        return jsonify({"error": f"Log file not found: {filename}"}), 404
+    except Exception as e:
+        logger.error(f"Error reading log {filename}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/logs/<path:filename>/download', methods=['GET'])
+def download_log(filename):
+    """Download complete log file"""
+    try:
+        if not logging_sys:
+            return jsonify({"error": "Logging system not available"}), 503
+
+        log_path = logging_sys.log_dir / filename
+
+        if not log_path.exists():
+            return jsonify({"error": "Log file not found"}), 404
+
+        return send_from_directory(logging_sys.log_dir, filename, as_attachment=True)
+    except Exception as e:
+        logger.error(f"Error downloading log {filename}: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/logs/purge', methods=['POST'])
+def purge_logs():
+    """
+    Purge old log files
+
+    Body:
+    - days: Delete logs older than this many days (default: 30)
+    """
+    try:
+        if not logging_sys:
+            return jsonify({"error": "Logging system not available"}), 503
+
+        data = request.get_json() or {}
+        days = data.get('days', 30)
+
+        result = logging_sys.purge_old_logs(days=days)
+
+        return jsonify({
+            "message": f"Purged logs older than {days} days",
+            **result
+        })
+    except Exception as e:
+        logger.error(f"Error purging logs: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/system/health', methods=['GET'])
+def system_health():
+    """
+    Get detailed system health including crash history and uptime
+    """
+    try:
+        health_data = {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "service": "Rubix Recorder API",
+            "version": "1.0.0"
+        }
+
+        if logging_sys:
+            crash_history = logging_sys.get_crash_history()
+            health_data["uptime"] = {
+                "seconds": crash_history["current_uptime_seconds"],
+                "human": crash_history["current_uptime_human"],
+                "start_time": crash_history["start_time"]
+            }
+            health_data["stability"] = {
+                "total_crashes": crash_history["total_crashes"],
+                "clean_shutdowns": crash_history["clean_shutdowns"],
+                "recent_crashes": crash_history["recent_crashes"]
+            }
+
+        # Add recording status
+        with recording_lock:
+            if current_recording_session:
+                health_data["recording"] = {
+                    "active": True,
+                    "session_id": current_recording_session.id,
+                    "status": current_recording_session.status
+                }
+            else:
+                health_data["recording"] = {"active": False}
+
+        return jsonify(health_data)
+    except Exception as e:
+        logger.error(f"Error getting system health: {e}", exc_info=True)
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
+
 def main():
     """Main entry point"""
     # Create necessary directories
     os.makedirs('logs', exist_ok=True)
     os.makedirs(config["playback_directory"], exist_ok=True)
     os.makedirs(config["recordings_directory"], exist_ok=True)
-    
+
     logger.info("Starting Rubix Recorder API Server")
     logger.info(f"Listening on {config['host']}:{config['port']}")
-    
-    # Start Flask server
-    app.run(
-        host=config['host'],
-        port=config['port'],
-        debug=config['debug'],
-        threaded=True
-    )
+
+    try:
+        # Start Flask server
+        app.run(
+            host=config['host'],
+            port=config['port'],
+            debug=config['debug'],
+            threaded=True
+        )
+    except KeyboardInterrupt:
+        logger.info("Server stopped by user")
+    except Exception as e:
+        logger.critical(f"Server crashed: {e}", exc_info=True)
+        raise
+    finally:
+        # Mark clean shutdown
+        if logging_sys:
+            logging_sys.mark_clean_shutdown()
+            logger.info("Clean shutdown completed")
 
 if __name__ == '__main__':
     main()
