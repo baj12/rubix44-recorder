@@ -60,8 +60,10 @@ CORS(app)  # Enable CORS for all routes
 # Global variables for recording management
 current_recording_session = None
 recording_thread = None
+watchdog_thread = None
 recording_lock = threading.Lock()
 
+# Watchdog configuration: how much extra time (in seconds) to allow before force-stopping
 # Configuration
 CONFIG_FILE = 'config/api_config.json'
 DEFAULT_CONFIG = {
@@ -73,6 +75,7 @@ DEFAULT_CONFIG = {
     "output_prefix": "api_recording",
     "playback_directory": "playback_files",
     "recordings_directory": "recordings",
+    "watchdog_grace_period": 60,  # Seconds of extra time before watchdog force-stops recording
     "storage_server": {
         "enabled": False,
         "host": "",
@@ -289,6 +292,74 @@ def start_recording_in_thread(session):
             current_recording_session = None
             logger.debug(f"Recording thread for session {session.id} completed")
 
+def watchdog_monitor(session):
+    """
+    Watchdog thread that monitors recording sessions and force-stops them
+    if they exceed expected duration + grace period.
+
+    This prevents runaway recordings that hang due to audio driver issues,
+    device disconnections, or other unexpected problems.
+    """
+    import time
+
+    session_id = session.id
+    expected_duration = session.duration
+    grace_period = config.get("watchdog_grace_period", 60)
+    max_duration = expected_duration + grace_period
+    check_interval = 5  # Check every 5 seconds
+
+    logger.info(f"Watchdog started for session {session_id}: max duration = {max_duration}s (expected: {expected_duration}s + {grace_period}s grace)")
+
+    while True:
+        time.sleep(check_interval)
+
+        with recording_lock:
+            # Check if this session is still the current one and still recording
+            if current_recording_session is None:
+                logger.debug(f"Watchdog: Session {session_id} is no longer active, exiting watchdog")
+                return
+
+            if current_recording_session.id != session_id:
+                logger.debug(f"Watchdog: Different session now active, exiting watchdog for {session_id}")
+                return
+
+            if current_recording_session.status != "recording":
+                logger.debug(f"Watchdog: Session {session_id} status is {current_recording_session.status}, exiting watchdog")
+                return
+
+            # Calculate elapsed time
+            if current_recording_session.start_time:
+                elapsed = (datetime.now() - current_recording_session.start_time).total_seconds()
+            else:
+                elapsed = 0
+
+        # Check if we've exceeded maximum duration
+        if elapsed > max_duration:
+            logger.warning(f"Watchdog: Session {session_id} exceeded max duration ({elapsed:.1f}s > {max_duration}s), force-stopping!")
+
+            with recording_lock:
+                if current_recording_session and current_recording_session.id == session_id:
+                    # Signal the recorder to stop
+                    if current_recording_session.recorder:
+                        try:
+                            current_recording_session.recorder.stop_recording()
+                        except Exception as e:
+                            logger.error(f"Watchdog: Error stopping recorder: {e}")
+
+                    # Mark session as stopped with error note
+                    current_recording_session.status = "stopped"
+                    current_recording_session.end_time = datetime.now()
+                    current_recording_session.error = f"Watchdog timeout: recording exceeded {max_duration}s (expected {expected_duration}s)"
+
+                    logger.warning(f"Watchdog: Force-stopped session {session_id} after {elapsed:.1f}s")
+
+            return
+
+        # Log progress periodically (every minute approximately)
+        if int(elapsed) % 60 < check_interval:
+            remaining = max_duration - elapsed
+            logger.debug(f"Watchdog: Session {session_id} running for {elapsed:.0f}s, {remaining:.0f}s until timeout")
+
 @app.route('/api/v1/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -481,6 +552,7 @@ def start_recording():
     logger.debug(f"Created session with ID: {session.id} (human ID: {session.human_id})")
     
     # Start recording in background thread
+    global recording_thread, watchdog_thread
     logger.debug("Starting recording thread")
     recording_thread = threading.Thread(
         target=start_recording_in_thread,
@@ -488,8 +560,17 @@ def start_recording():
         daemon=True
     )
     recording_thread.start()
-    
-    logger.info(f"Started recording session {session.id}")
+
+    # Start watchdog thread to monitor for runaway recordings
+    logger.debug("Starting watchdog thread")
+    watchdog_thread = threading.Thread(
+        target=watchdog_monitor,
+        args=(session,),
+        daemon=True
+    )
+    watchdog_thread.start()
+
+    logger.info(f"Started recording session {session.id} with watchdog monitoring")
     logger.debug(f"Session details: {session.to_dict()}")
     return jsonify({
         "message": "Recording started",
@@ -1076,6 +1157,73 @@ def system_health():
         logger.error(f"Error getting system health: {e}", exc_info=True)
         return jsonify({
             "status": "error",
+            "error": str(e)
+        }), 500
+
+@app.route('/api/v1/system/dependencies', methods=['GET'])
+def get_dependencies():
+    """Get versions of all Python dependencies"""
+    try:
+        import numpy
+        import scipy
+        import sounddevice
+        import soundfile
+        import flask
+        import platform
+
+        dependencies = {
+            "python": {
+                "version": sys.version,
+                "version_info": {
+                    "major": sys.version_info.major,
+                    "minor": sys.version_info.minor,
+                    "micro": sys.version_info.micro
+                }
+            },
+            "numpy": {
+                "version": numpy.__version__,
+                "config": {}
+            },
+            "scipy": {
+                "version": scipy.__version__
+            },
+            "sounddevice": {
+                "version": sounddevice.__version__
+            },
+            "soundfile": {
+                "version": soundfile.__version__
+            },
+            "flask": {
+                "version": flask.__version__
+            },
+            "system": {
+                "platform": platform.platform(),
+                "processor": platform.processor(),
+                "machine": platform.machine()
+            }
+        }
+
+        # Try to get NumPy build config (may fail on some systems)
+        try:
+            import numpy.core._multiarray_umath as mu
+            dependencies["numpy"]["has_avx2"] = hasattr(mu, '__cpu_features__')
+        except:
+            dependencies["numpy"]["has_avx2"] = "unknown"
+
+        # Add AVX compatibility check
+        numpy_major = int(numpy.__version__.split('.')[0])
+        if numpy_major >= 2:
+            dependencies["numpy"]["avx2_required"] = True
+            dependencies["numpy"]["compatibility_warning"] = "NumPy 2.x requires AVX2 CPU support"
+        else:
+            dependencies["numpy"]["avx2_required"] = False
+            dependencies["numpy"]["compatibility_warning"] = None
+
+        return jsonify(dependencies)
+
+    except Exception as e:
+        logger.error(f"Error getting dependencies: {e}", exc_info=True)
+        return jsonify({
             "error": str(e)
         }), 500
 
