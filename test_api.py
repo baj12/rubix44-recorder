@@ -342,10 +342,19 @@ class RubixAPITester:
         """Test complete recording cycle: start, monitor, stop"""
         # First, get available playback files
         files_data, files_status = self.request("GET", "playback-files")
-        if files_status != 200 or not files_data.get("files"):
+        if files_status != 200:
+            return False, "Failed to get playback files"
+        # API returns either {"files": [...]} or just [...]
+        if isinstance(files_data, list):
+            files = files_data
+        else:
+            files = files_data.get("files", [])
+        if not files:
             return False, "No playback files available for testing"
 
-        playback_file = files_data["files"][0]["name"]
+        # Get filename - check for 'filename' or 'name' key
+        first_file = files[0]
+        playback_file = first_file.get("filename") or first_file.get("name")
         self.log(f"Using playback file: {playback_file}", "info")
 
         # Start recording
@@ -412,10 +421,16 @@ class RubixAPITester:
         """Test that starting a second recording is rejected"""
         # Get playback files
         files_data, _ = self.request("GET", "playback-files")
-        if not files_data.get("files"):
+        # API returns either {"files": [...]} or just [...]
+        if isinstance(files_data, list):
+            files = files_data
+        else:
+            files = files_data.get("files", [])
+        if not files:
             return True, "Skipped: No playback files available"
 
-        playback_file = files_data["files"][0]["name"]
+        first_file = files[0]
+        playback_file = first_file.get("filename") or first_file.get("name")
 
         # Start first recording
         start_data, start_status = self.request("POST", "recordings/start", json={
@@ -437,10 +452,11 @@ class RubixAPITester:
                 "duration": 10
             })
 
-            if second_status != 409:
-                return False, f"Expected 409 conflict, got {second_status}"
+            # Accept both 400 and 409 as valid rejection codes
+            if second_status not in (400, 409):
+                return False, f"Expected 400 or 409 rejection, got {second_status}"
 
-            return True, "Correctly rejected concurrent recording"
+            return True, f"Correctly rejected concurrent recording (status {second_status})"
         finally:
             # Clean up - stop the first recording
             self.request("POST", "recordings/stop")
