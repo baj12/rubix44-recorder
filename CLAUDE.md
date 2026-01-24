@@ -235,3 +235,91 @@ The API supports automatic or manual transfer of recordings to a remote storage 
 - Set `auto_transfer: true` to automatically transfer recordings after completion
 - Use `/api/v1/recordings/transfer` endpoint to manually transfer specific sessions
 - Add `delete_after_transfer: true` to remove local files after successful transfer
+
+### Watchdog Timer
+
+The API includes a watchdog timer that prevents runaway recordings. If a recording exceeds its expected duration plus the grace period, it will be automatically stopped.
+
+- **Configuration**: `watchdog_grace_period` in config (default: 60 seconds)
+- **Behavior**: Recording is force-stopped if it exceeds `duration + grace_period`
+- **Logging**: Watchdog events are logged with `Watchdog:` prefix
+
+## Remote Server Access
+
+The Rubix44 hardware runs on a Windows machine accessible via SSH.
+
+### SSH Access
+
+```bash
+# Connect to remote Windows machine
+ssh bernd@10.0.0.58
+
+# Remote project location
+C:\Users\bernd\Documents\Projects\rubix44-recorder
+
+# Conda environment on remote
+C:\Users\bernd\miniconda3\envs\rubix-recorder-api\python.exe
+```
+
+### Common Remote Operations
+
+```bash
+# Check API status
+curl -s http://10.0.0.58:5000/api/v1/status | python3 -m json.tool
+
+# Check recent recordings
+curl -s http://10.0.0.58:5000/api/v1/recordings/history | python3 -c "import sys, json; data = json.load(sys.stdin); print(json.dumps(data[:5], indent=2))"
+
+# Start the API server on remote (via SSH)
+ssh bernd@10.0.0.58 "cd C:\\Users\\bernd\\Documents\\Projects\\rubix44-recorder && C:\\Users\\bernd\\miniconda3\\envs\\rubix-recorder-api\\python.exe api_server.py"
+
+# Stop Python processes on remote
+ssh bernd@10.0.0.58 "taskkill /F /IM python.exe"
+
+# Copy files to remote
+scp api_server.py bernd@10.0.0.58:"C:\\Users\\bernd\\Documents\\Projects\\rubix44-recorder\\api_server.py"
+
+# Git operations on remote
+ssh bernd@10.0.0.58 "cd C:\\Users\\bernd\\Documents\\Projects\\rubix44-recorder && git status"
+ssh bernd@10.0.0.58 "cd C:\\Users\\bernd\\Documents\\Projects\\rubix44-recorder && git pull"
+```
+
+**Note:** Git push from remote Windows machine may fail due to credential issues. Push from local machine instead.
+
+## Testing
+
+### Running the Test Suite
+
+The project includes a comprehensive test suite that can run locally or against the remote server:
+
+```bash
+# Run all tests against remote server
+python test_api.py --host 10.0.0.58
+
+# Run specific test categories
+python test_api.py --host 10.0.0.58 --test health
+python test_api.py --host 10.0.0.58 --test devices
+python test_api.py --host 10.0.0.58 --test recording
+python test_api.py --host 10.0.0.58 --test storage
+python test_api.py --host 10.0.0.58 --test logs
+python test_api.py --host 10.0.0.58 --test watchdog
+
+# Skip recording tests (faster)
+python test_api.py --host 10.0.0.58 --skip-recording
+
+# Quick mode (shorter recording durations)
+python test_api.py --host 10.0.0.58 --quick
+
+# Verbose output
+python test_api.py --host 10.0.0.58 -v
+```
+
+### Test Categories
+
+- **health**: Health endpoints, config, system dependencies
+- **devices**: Audio device listing, Rubix44 detection
+- **playback**: Playback files listing and metadata
+- **recording**: Full recording cycle, error handling, concurrent rejection
+- **storage**: Storage server configuration
+- **logs**: Log file listing and retrieval
+- **watchdog**: Watchdog timeout functionality
