@@ -53,6 +53,12 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Configure rubix_recorder logger to use the same handlers
+rubix_logger = logging.getLogger('rubix_recorder')
+rubix_logger.setLevel(logging.DEBUG)
+# Ensure it propagates to root logger which has the handlers
+rubix_logger.propagate = True
+
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -222,6 +228,13 @@ def start_recording_in_thread(session):
         # Store recorder reference in session
         session.recorder = recorder
         logger.debug(f"Stored recorder reference for session {session.id}")
+
+        # Capture the actual device IDs used (after auto-detection)
+        with recording_lock:
+            if session.input_device is None and hasattr(recorder, 'input_device'):
+                session.input_device = recorder.input_device
+            if session.output_device is None and hasattr(recorder, 'output_device'):
+                session.output_device = recorder.output_device
         
         # Start recording with playback
         logger.debug(f"Calling record_with_playback with playback_file={session.playback_file_path}, output_prefix={session.output_prefix}")
@@ -350,6 +363,27 @@ def watchdog_monitor(session):
                     current_recording_session.status = "stopped"
                     current_recording_session.end_time = datetime.now()
                     current_recording_session.error = f"Watchdog timeout: recording exceeded {max_duration}s (expected {expected_duration}s)"
+
+                    # Try to collect any files that may have been created
+                    if current_recording_session.start_time:
+                        timestamp = current_recording_session.start_time.strftime("%Y-%m-%d_%H-%M-%S")
+                        base_path = f"{config['recordings_directory']}/{current_recording_session.output_prefix}_{timestamp}"
+                        verified_files = []
+                        for suffix in ['_stereo.wav', '_ch1.wav', '_ch2.wav']:
+                            file_path = base_path + suffix
+                            if os.path.exists(file_path):
+                                try:
+                                    stat = os.stat(file_path)
+                                    verified_files.append({
+                                        "name": os.path.basename(file_path),
+                                        "path": file_path,
+                                        "size": stat.st_size,
+                                        "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+                                    })
+                                except Exception as e:
+                                    logger.warning(f"Watchdog: Error getting file stats: {e}")
+                        current_recording_session.files = verified_files
+                        logger.info(f"Watchdog: Found {len(verified_files)} output files")
 
                     logger.warning(f"Watchdog: Force-stopped session {session_id} after {elapsed:.1f}s")
 

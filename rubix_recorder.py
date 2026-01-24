@@ -5,6 +5,7 @@ Records two channels while playing back a WAV file through Rubix44
 """
 
 import argparse
+import logging
 import sys
 import threading
 import time
@@ -13,6 +14,10 @@ from datetime import datetime
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
+
+# Set up logging - use the rubix_recorder logger
+# This will inherit api_server's configuration when used via the API
+logger = logging.getLogger('rubix_recorder')
 
 
 class AudioRecorder:
@@ -233,27 +238,46 @@ class AudioRecorder:
                 except Exception as e:
                     print(f"  Warning: Error stopping recording: {e}")
             else:
+                # Recording should be complete since we waited self.duration seconds
+                # Call sd.stop() to ensure recording is finalized, then wait briefly
                 try:
-                    sd.wait()  # Wait for natural completion
+                    sd.stop()  # Finalize recording
                 except Exception as e:
-                    print(f"  Warning: Error waiting for recording completion: {e}")
+                    print(f"  Warning: Error stopping recording: {e}")
+                # Brief wait to ensure buffers are flushed
+                time.sleep(0.5)
             
             print("Recording complete! Saving files...")
-            
+            logger.info(f"Recording complete. Array shape: {self.recording.shape}")
+            print(f"  Recording array shape: {self.recording.shape}")
+
             # Save as stereo file
             stereo_filename = f"recordings/{output_prefix}_{timestamp}_stereo.wav"
             sf.write(stereo_filename, self.recording, self.sample_rate)
-            print(f"✓ Saved: {stereo_filename}")
+            logger.info(f"Saved stereo file: {stereo_filename}")
+            try:
+                print(f"[OK] Saved: {stereo_filename}")
+            except UnicodeEncodeError:
+                print(f"Saved: {stereo_filename}")
+
+            # Save channels separately (only if we have 2D array with 2 channels)
+            logger.info(f"Checking array shape for channel split: shape={self.recording.shape}")
+            if len(self.recording.shape) == 2 and self.recording.shape[1] >= 2:
+                logger.info(f"Array shape OK, proceeding with channel split")
+                ch1_filename = f"recordings/{output_prefix}_{timestamp}_ch1.wav"
+                ch2_filename = f"recordings/{output_prefix}_{timestamp}_ch2.wav"
+                logger.info(f"Writing ch1 file: {ch1_filename}")
+                sf.write(ch1_filename, self.recording[:, 0], self.sample_rate)
+                logger.info(f"Ch1 written, writing ch2 file: {ch2_filename}")
+                sf.write(ch2_filename, self.recording[:, 1], self.sample_rate)
+                logger.info(f"Saved channel files: {ch1_filename}, {ch2_filename}")
+                print(f"[OK] Saved: {ch1_filename}")
+                print(f"[OK] Saved: {ch2_filename}")
+            else:
+                logger.warning(f"Recording has unexpected shape {self.recording.shape}, skipping channel split")
+                print(f"  Warning: Recording has unexpected shape {self.recording.shape}, skipping channel split")
             
-            # Save channels separately
-            ch1_filename = f"recordings/{output_prefix}_{timestamp}_ch1.wav"
-            ch2_filename = f"recordings/{output_prefix}_{timestamp}_ch2.wav"
-            sf.write(ch1_filename, self.recording[:, 0], self.sample_rate)
-            sf.write(ch2_filename, self.recording[:, 1], self.sample_rate)
-            print(f"✓ Saved: {ch1_filename}")
-            print(f"✓ Saved: {ch2_filename}")
-            
-            print("\n✓ All files saved successfully!")
+            print("\n[OK] All files saved successfully!")
             return True
             
         except KeyboardInterrupt:
@@ -264,7 +288,10 @@ class AudioRecorder:
                 print(f"  Warning: Error stopping recording: {e}")
             return False
         except Exception as e:
+            logger.error(f"Error during recording: {e}", exc_info=True)
             print(f"\nError during recording: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
 def main():
