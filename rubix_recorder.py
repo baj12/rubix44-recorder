@@ -98,9 +98,11 @@ class AudioRecorder:
                     "  3. Rubix44 drivers are installed (if needed)\n"
                     "Run with --list-devices to see available devices"
                 )
+            # Store detected device ID back to instance for API access
+            self.input_device = input_id
         else:
             input_id = self.input_device
-        
+
         # Setup output device
         if self.output_device is None:
             output_id = self.find_device('rubix', 'output')
@@ -113,6 +115,8 @@ class AudioRecorder:
                     "  3. Rubix44 drivers are installed (if needed)\n"
                     "Run with --list-devices to see available devices"
                 )
+            # Store detected device ID back to instance for API access
+            self.output_device = output_id
         else:
             output_id = self.output_device
         

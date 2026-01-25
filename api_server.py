@@ -179,6 +179,15 @@ class RecordingSession:
         return 0
         
     def to_dict(self):
+        # Get device info from recorder instance if available (after auto-detection)
+        input_device = self.input_device
+        output_device = self.output_device
+        if self.recorder:
+            if self.recorder.input_device is not None:
+                input_device = self.recorder.input_device
+            if self.recorder.output_device is not None:
+                output_device = self.recorder.output_device
+
         result = {
             "id": self.id,
             "human_id": self.human_id,
@@ -189,8 +198,8 @@ class RecordingSession:
             "sample_rate": self.sample_rate,
             "channels": self.channels,
             "output_prefix": self.output_prefix,
-            "input_device": self.input_device,
-            "output_device": self.output_device,
+            "input_device": input_device,
+            "output_device": output_device,
             "status": self.status,
             "files": self.files,
             "error": self.error
@@ -678,11 +687,35 @@ def get_complete_status():
 
         with recording_lock:
             if current_recording_session and current_recording_session.status == "recording":
-                # During recording, assume devices are connected and use cached info
+                # During recording, get device info from recorder instance if available
                 rubix_status["connected"] = True
-                # We can infer device info from the session itself
-                if current_recording_session.input_device or current_recording_session.output_device:
-                    rubix_status["note"] = "Device details unavailable during active recording (performance optimization)"
+                recorder = current_recording_session.recorder
+                if recorder:
+                    import sounddevice as sd
+                    # Get input device info
+                    if recorder.input_device is not None:
+                        try:
+                            input_info = sd.query_devices(recorder.input_device)
+                            rubix_status["input_device"] = {
+                                "id": recorder.input_device,
+                                "name": input_info['name'],
+                                "channels": input_info['max_input_channels'],
+                                "sample_rate": input_info['default_samplerate']
+                            }
+                        except Exception:
+                            pass
+                    # Get output device info
+                    if recorder.output_device is not None:
+                        try:
+                            output_info = sd.query_devices(recorder.output_device)
+                            rubix_status["output_device"] = {
+                                "id": recorder.output_device,
+                                "name": output_info['name'],
+                                "channels": output_info['max_output_channels'],
+                                "sample_rate": output_info['default_samplerate']
+                            }
+                        except Exception:
+                            pass
             else:
                 # Only query devices when NOT recording (to avoid slowdown)
                 import sounddevice as sd
