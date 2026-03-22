@@ -6,6 +6,8 @@ Records two channels while playing back a WAV file through Rubix44
 
 import argparse
 import logging
+import os
+import queue
 import sys
 import threading
 import time
@@ -67,15 +69,12 @@ class AudioRecorder:
     
     def record_with_playback(self, playback_file, output_prefix='recording'):
         """
-        Record audio while playing back a file through Rubix44
-        
-        Args:
-            playback_file: Path to WAV file to play during recording
-            output_prefix: Prefix for output filenames
+        Record audio while playing back a file through Rubix44.
+        Uses streaming writes to disk to keep memory usage constant regardless
+        of recording duration (avoids the ~1.27 GB allocation from sd.rec()).
         """
-        # Generate timestamp
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        
+
         # Load playback file
         try:
             playback_data, playback_sr = sf.read(playback_file)
@@ -85,7 +84,7 @@ class AudioRecorder:
         except Exception as e:
             print(f"Error loading playback file: {e}")
             return False
-        
+
         # Setup input device
         if self.input_device is None:
             input_id = self.find_device('rubix', 'input')
@@ -98,7 +97,6 @@ class AudioRecorder:
                     "  3. Rubix44 drivers are installed (if needed)\n"
                     "Run with --list-devices to see available devices"
                 )
-            # Store detected device ID back to instance for API access
             self.input_device = input_id
         else:
             input_id = self.input_device
@@ -115,15 +113,13 @@ class AudioRecorder:
                     "  3. Rubix44 drivers are installed (if needed)\n"
                     "Run with --list-devices to see available devices"
                 )
-            # Store detected device ID back to instance for API access
             self.output_device = output_id
         else:
             output_id = self.output_device
-        
-        # Get device info
-        input_device_info = sd.query_devices(input_id) if input_id else sd.query_devices(kind='input')
-        output_device_info = sd.query_devices(output_id) if output_id else sd.query_devices(kind='output')
-        
+
+        input_device_info = sd.query_devices(input_id)
+        output_device_info = sd.query_devices(output_id)
+
         print(f"\nRecording Configuration:")
         print(f"  Input Device: {input_device_info['name']}")
         print(f"  Output Device: {output_device_info['name']}")
@@ -132,170 +128,146 @@ class AudioRecorder:
         print(f"  Recording channels: 2")
         print(f"  Output prefix: {output_prefix}")
         print(f"  Timestamp: {timestamp}")
-        
-        # Ensure playback data is the right shape
+
+        # Ensure playback data is stereo
         if len(playback_data.shape) == 1:
-            # Mono file - convert to stereo
             playback_data = np.column_stack([playback_data, playback_data])
             print("  Note: Converted mono playback to stereo")
-        
-        # Resample playback if necessary
+
+        # Resample playback to match recording sample rate.
+        # Running input and output streams at different sample rates on the same
+        # device is a known source of driver instability.
         if playback_sr != self.sample_rate:
-            print(f"  Warning: Playback sample rate ({playback_sr}) doesn't match recording ({self.sample_rate})")
-            print(f"           Consider converting your file to {self.sample_rate} Hz")
-        
-        # Start playback in a separate thread
-        def play_audio():
+            print(f"  Resampling playback from {playback_sr} Hz to {self.sample_rate} Hz...")
             try:
-                # Loop the playback if it's shorter than recording duration
-                loops_needed = int(np.ceil(self.duration * playback_sr / len(playback_data)))
-                if loops_needed > 1:
-                    looped_data = np.tile(playback_data, (loops_needed, 1))
-                    playback_length = int(self.duration * playback_sr)
-                    try:
-                        sd.play(
-                            looped_data[:playback_length],
-                            playback_sr,
-                            device=output_id
-                        )
-                    except TypeError as e:
-                        if "callbackoptions" in str(e).lower():
-                            print("  Warning: Sounddevice callbackoptions error, retrying with different parameters")
-                            sd.play(
-                                looped_data[:playback_length],
-                                playback_sr,
-                                device=output_id,
-                                blocking=False
-                            )
-                        else:
-                            raise
-                else:
-                    sd.play(playback_data, playback_sr, device=output_id)
-                print("  Playback started on Rubix44 outputs")
-            except TypeError as e:
-                if "callbackoptions" in str(e).lower():
-                    print("  Warning: Sounddevice callbackoptions error, retrying with different parameters")
-                    if loops_needed > 1:
-                        sd.play(
-                            looped_data[:playback_length],
-                            playback_sr,
-                            device=output_id,
-                            blocking=False
-                        )
-                    else:
-                        sd.play(playback_data, playback_sr, device=output_id, blocking=False)
-                else:
-                    raise
-            except Exception as e:
-                print(f"  Error starting playback: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        try:
-            print("\nStarting recording and playback...")
-            
-            # Start playback
-            playback_thread = threading.Thread(target=play_audio)
-            playback_thread.start()
-            
-            # Small delay to ensure playback starts
-            import time
-            time.sleep(0.1)
-            
-            # Start recording
-            try:
-                self.recording = sd.rec(
-                    int(self.duration * self.sample_rate),
-                    samplerate=self.sample_rate,
-                    channels=2,
-                    device=input_id
+                from math import gcd
+                from scipy.signal import resample_poly
+                g = gcd(int(playback_sr), int(self.sample_rate))
+                playback_data = resample_poly(
+                    playback_data, int(self.sample_rate) // g, int(playback_sr) // g, axis=0
                 )
-            except TypeError as e:
-                if "callbackoptions" in str(e).lower():
-                    print("  Warning: Sounddevice callbackoptions error in recording, retrying with different parameters")
-                    self.recording = sd.rec(
-                        int(self.duration * self.sample_rate),
-                        samplerate=self.sample_rate,
-                        channels=2,
-                        device=input_id,
-                        blocking=False
-                    )
-                else:
-                    raise
-            
-            # Wait for recording to complete
-            print("Recording in progress... Press Ctrl+C to stop early")
-            # Check for stop signal periodically
-            import time
-            start_time = time.time()
-            while not self.should_stop and (time.time() - start_time) < self.duration:
-                time.sleep(0.1)  # Check every 100ms
-                # NOTE: We intentionally DO NOT call sd.get_status() here because it can
-                # block/hang during active recording, freezing the entire Python process.
-                # We rely on time-based checking and let sd.wait() handle completion.
-            
-            # If stop was requested, stop the recording
-            if self.should_stop:
-                print("\n\nRecording stopped by API request")
-                try:
-                    sd.stop()
-                except Exception as e:
-                    print(f"  Warning: Error stopping recording: {e}")
-            else:
-                # Recording should be complete since we waited self.duration seconds
-                # Call sd.stop() to ensure recording is finalized, then wait briefly
-                try:
-                    sd.stop()  # Finalize recording
-                except Exception as e:
-                    print(f"  Warning: Error stopping recording: {e}")
-                # Brief wait to ensure buffers are flushed
-                time.sleep(0.5)
-            
-            print("Recording complete! Saving files...")
-            logger.info(f"Recording complete. Array shape: {self.recording.shape}")
-            print(f"  Recording array shape: {self.recording.shape}")
+                playback_sr = self.sample_rate
+                print(f"  Resampled playback to {self.sample_rate} Hz")
+            except Exception as e:
+                print(f"  Warning: Could not resample playback ({e}). Proceeding with mismatched rates.")
 
-            # Save as stereo file
-            stereo_filename = f"recordings/{output_prefix}_{timestamp}_stereo.wav"
-            sf.write(stereo_filename, self.recording, self.sample_rate)
-            logger.info(f"Saved stereo file: {stereo_filename}")
+        # Loop playback to cover the full recording duration
+        playback_frames_needed = int(self.duration * playback_sr)
+        if len(playback_data) < playback_frames_needed:
+            loops_needed = int(np.ceil(playback_frames_needed / len(playback_data)))
+            looped = np.tile(playback_data, (loops_needed, 1))
+            playback_to_play = looped[:playback_frames_needed]
+            print(f"  Looping playback {loops_needed}x to cover {self.duration}s")
+        else:
+            playback_to_play = playback_data[:playback_frames_needed]
+
+        # Output file paths
+        os.makedirs('recordings', exist_ok=True)
+        stereo_filename = f"recordings/{output_prefix}_{timestamp}_stereo.wav"
+        ch1_filename = f"recordings/{output_prefix}_{timestamp}_ch1.wav"
+        ch2_filename = f"recordings/{output_prefix}_{timestamp}_ch2.wav"
+
+        # Thread-safe queue: audio callback enqueues chunks; a writer thread drains
+        # them to disk.  This keeps memory at ~one chunk (~350 KB at 4096 frames)
+        # regardless of recording duration, avoiding the previous ~1.27 GB allocation.
+        audio_queue = queue.Queue(maxsize=500)
+        write_error = [None]
+        total_frames_written = [0]
+
+        def audio_callback(indata, frames, time_info, status):  # noqa: ARG001
+            if status:
+                logger.warning(f"Audio stream status: {status}")
             try:
-                print(f"[OK] Saved: {stereo_filename}")
-            except UnicodeEncodeError:
-                print(f"Saved: {stereo_filename}")
+                audio_queue.put_nowait(indata.copy())
+            except queue.Full:
+                logger.error("Audio queue full — dropping frames (disk write too slow?)")
 
-            # Save channels separately (only if we have 2D array with 2 channels)
-            logger.info(f"Checking array shape for channel split: shape={self.recording.shape}")
-            if len(self.recording.shape) == 2 and self.recording.shape[1] >= 2:
-                logger.info(f"Array shape OK, proceeding with channel split")
-                ch1_filename = f"recordings/{output_prefix}_{timestamp}_ch1.wav"
-                ch2_filename = f"recordings/{output_prefix}_{timestamp}_ch2.wav"
-                logger.info(f"Writing ch1 file: {ch1_filename}")
-                sf.write(ch1_filename, self.recording[:, 0], self.sample_rate)
-                logger.info(f"Ch1 written, writing ch2 file: {ch2_filename}")
-                sf.write(ch2_filename, self.recording[:, 1], self.sample_rate)
-                logger.info(f"Saved channel files: {ch1_filename}, {ch2_filename}")
-                print(f"[OK] Saved: {ch1_filename}")
-                print(f"[OK] Saved: {ch2_filename}")
-            else:
-                logger.warning(f"Recording has unexpected shape {self.recording.shape}, skipping channel split")
-                print(f"  Warning: Recording has unexpected shape {self.recording.shape}, skipping channel split")
-            
-            print("\n[OK] All files saved successfully!")
-            return True
-            
-        except KeyboardInterrupt:
-            print("\n\nRecording interrupted by user")
+        def writer_thread_fn():
+            try:
+                with (
+                    sf.SoundFile(stereo_filename, mode='w', samplerate=self.sample_rate, channels=2) as stereo_f,
+                    sf.SoundFile(ch1_filename, mode='w', samplerate=self.sample_rate, channels=1) as ch1_f,
+                    sf.SoundFile(ch2_filename, mode='w', samplerate=self.sample_rate, channels=1) as ch2_f,
+                ):
+                    while True:
+                        try:
+                            data = audio_queue.get(timeout=2.0)
+                            if data is None:  # sentinel: recording finished
+                                break
+                            stereo_f.write(data)
+                            ch1_f.write(data[:, 0:1])
+                            ch2_f.write(data[:, 1:2])
+                            total_frames_written[0] += len(data)
+                        except queue.Empty:
+                            continue
+            except Exception as e:
+                write_error[0] = e
+                logger.error(f"Writer thread error: {e}", exc_info=True)
+
+        writer = threading.Thread(target=writer_thread_fn, daemon=True)
+
+        def _stop_playback():
             try:
                 sd.stop()
             except Exception as e:
-                print(f"  Warning: Error stopping recording: {e}")
+                logger.warning(f"Error stopping playback: {e}")
+
+        def _drain_writer():
+            audio_queue.put(None)  # sentinel
+            writer.join(timeout=60)
+
+        try:
+            print("\nStarting recording and playback...")
+            writer.start()
+
+            with sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=2,
+                device=input_id,
+                callback=audio_callback,
+                blocksize=4096,
+            ):
+                # Start playback (non-blocking; plays on the output device)
+                sd.play(playback_to_play, playback_sr, device=output_id)
+                print("Recording in progress... Press Ctrl+C to stop early")
+
+                start_time = time.time()
+                while not self.should_stop and (time.time() - start_time) < self.duration:
+                    time.sleep(0.1)
+            # Exiting the 'with' block stops and closes the InputStream.
+
+            if self.should_stop:
+                print("\n\nRecording stopped by API request")
+            _stop_playback()
+            _drain_writer()
+
+            if write_error[0]:
+                raise RuntimeError(f"Audio file write failed: {write_error[0]}")
+
+            frames = total_frames_written[0]
+            logger.info(f"Recording complete. Wrote {frames} frames ({frames / self.sample_rate:.1f}s) to 3 files.")
+            print(f"Recording complete! Saved {frames / self.sample_rate:.1f}s of audio.")
+            try:
+                print(f"[OK] Saved: {stereo_filename}")
+                print(f"[OK] Saved: {ch1_filename}")
+                print(f"[OK] Saved: {ch2_filename}")
+            except UnicodeEncodeError:
+                print(f"Saved: {stereo_filename}, {ch1_filename}, {ch2_filename}")
+            print("\n[OK] All files saved successfully!")
+            return True
+
+        except KeyboardInterrupt:
+            print("\n\nRecording interrupted by user")
+            _stop_playback()
+            _drain_writer()
             return False
         except Exception as e:
             logger.error(f"Error during recording: {e}", exc_info=True)
             print(f"\nError during recording: {e}")
             import traceback
             traceback.print_exc()
+            _stop_playback()
+            _drain_writer()
             return False
 
 def main():
@@ -361,7 +333,5 @@ def main():
     
     recorder.record_with_playback(args.playback_file, args.output)
 
-if __name__ == '__main__':
-    main()
 if __name__ == '__main__':
     main()
